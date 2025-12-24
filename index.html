@@ -613,6 +613,7 @@
             <div style="height:10px"></div>
             <div class="inline-row">
               <button class="btn-secondary" style="max-width:220px;" onclick="openAuth('login')">Gestisci account</button>
+              <button class="btn-secondary" style="max-width:220px;" onclick="switchAccount()">Cambia account</button>
               <button class="btn-secondary" style="max-width:220px; border-color: rgba(255,59,48,0.35);" onclick="logout()">Esci</button>
             </div>
           </div>
@@ -700,6 +701,7 @@
             <div style="height:12px"></div>
             <div class="inline-row">
               <button class="btn-primary" style="max-width:240px;" onclick="navTo('dashboard')">Vai ai corsi</button>
+              <button class="btn-secondary" style="max-width:240px;" onclick="switchAccount()">Cambia account</button>
               <button class="btn-secondary" style="max-width:200px; border-color: rgba(255,59,48,0.35);" onclick="logout()">Esci</button>
             </div>
           </div>
@@ -1909,6 +1911,9 @@ function drawModuleChart(labels, vals){
       state.afterAuth = active.replace("view-","");
 
       authError.style.display = "none";
+
+      // reset any success panel
+      try{ hideAuthSuccess(); }catch(e){}
       authError.textContent = "";
 
       // mostra pagina account
@@ -1951,6 +1956,59 @@ function drawModuleChart(labels, vals){
       authError.style.display = "block";
     }
 
+
+    function prettyAuthError(err){
+      const msg = (err && err.message) ? String(err.message) : String(err || "");
+      const low = msg.toLowerCase();
+      if (low.includes("invalid login credentials")) return "Email o password non corretti (oppure email non confermata).";
+      if (low.includes("email not confirmed")) return "Devi confermare la email prima di accedere.";
+      if (low.includes("already registered") || low.includes("user already registered")) return "Questa email è già registrata. Prova ad accedere.";
+      if (low.includes("password should be at least")) return "Password troppo corta (min 8).";
+      return msg || "Errore. Riprova.";
+    }
+
+    function hardClearSupabaseStorage(){
+      try{
+        const m = String(SUPABASE_URL || "").match(/^https?:\/\/([^.]+)\.supabase\.co/i);
+        const ref = m ? m[1] : null;
+        if (!ref) return;
+        const prefix = `sb-${ref}-`;
+        for (let i = localStorage.length - 1; i >= 0; i--){
+          const k = localStorage.key(i);
+          if (k && k.startsWith(prefix)) localStorage.removeItem(k);
+        }
+        for (let i = sessionStorage.length - 1; i >= 0; i--){
+          const k = sessionStorage.key(i);
+          if (k && k.startsWith(prefix)) sessionStorage.removeItem(k);
+        }
+      }catch(e){}
+    }
+
+    async function switchAccount(){
+      try{ await logout({ silent: true }); }catch(e){}
+      openAuth("login");
+      try{
+        document.getElementById("loginEmail").value = "";
+        document.getElementById("loginPass").value = "";
+        document.getElementById("loginEmail").focus();
+      }catch(e){}
+      toast("warn", "Cambia account", "Inserisci le credenziali del nuovo account.");
+    }
+
+    function showLoginSuccess(){
+      const uname = state.profile?.username || (state.currentUser?.email ? state.currentUser.email.split("@")[0] : "utente");
+      showAuthSuccess(
+        `Bentornato, ${uname}`,
+        "Accesso riuscito. I progressi sono attivi e sincronizzati.",
+        "Vai ai corsi",
+        ()=>{ hideAuthSuccess(); navTo("dashboard"); },
+        "Cambia account",
+        ()=>{ hideAuthSuccess(); switchAccount(); }
+      );
+      toast("success", "Accesso riuscito", "Bentornato.");
+    }
+
+
     function baseRedirectUrl(){
       // GitHub Pages: origin + pathname directory, ensure ends with "/"
       let p = window.location.pathname;
@@ -1958,6 +2016,7 @@ function drawModuleChart(labels, vals){
       return window.location.origin + p;
     }
 
+    
     async function signup(){
       const username = (document.getElementById("signupUser").value || "").trim();
       const email = (document.getElementById("signupEmail").value || "").trim();
@@ -1976,54 +2035,77 @@ function drawModuleChart(labels, vals){
             emailRedirectTo: baseRedirectUrl()
           }
         });
-        if (error) return showAuthError(error.message);
 
-        closeAuth();
-        toast('success','Accesso riuscito','Bentornato. I progressi sono attivi.');
+        if (error) return showAuthError(prettyAuthError(error));
+
+        // keep user in-app and show premium success panel (no browser alert)
+        try{ document.getElementById("signupPass").value = ""; }catch(e){}
         showSignupSuccess();
       }catch(e){
-        showAuthError("Errore signup. Riprova.");
+        console.warn(e);
+        showAuthError("Errore durante la registrazione. Riprova.");
       }
     }
 
+    
     async function login(){
       const email = (document.getElementById("loginEmail").value || "").trim();
       const pass = (document.getElementById("loginPass").value || "").trim();
+
       if (!email || !pass) return showAuthError("Inserisci email e password.");
+
+      // If user is already logged-in with a different email, suggest switching account
+      if (state.isLogged && state.currentUser?.email && state.currentUser.email.toLowerCase() !== email.toLowerCase()){
+        return showAuthError(`Sei già loggato come ${state.currentUser.email}. Premi “Cambia account” per entrare con un altro profilo.`);
+      }
 
       try{
         const { error } = await supa.auth.signInWithPassword({ email, password: pass });
-        if (error) return showAuthError(error.message);
-        closeAuth();
+        if (error) return showAuthError(prettyAuthError(error));
+
+        await refreshAuthState();
+        try{ document.getElementById("loginPass").value = ""; }catch(e){}
+        showLoginSuccess();
       }catch(e){
-        showAuthError("Errore login. Riprova.");
+        console.warn(e);
+        showAuthError("Errore durante il login. Riprova.");
       }
     }
 
-    async function logout(){
+    
+    async function logout(opts={}){
       if (!supa) return;
 
-      // Force-reset UI (prevents "stuck quiz" / missing next button)
-      forceResetSessionUI();
+      const silent = !!opts.silent;
 
+      // Force-reset UI (prevents "stuck quiz" / missing next button)
+      try{ forceResetSessionUI(); }catch(e){}
+
+      // Normal sign-out
       try{
         const { error } = await supa.auth.signOut({ scope: "local" });
         if (error) console.warn("signOut error", error);
-
-        // ensure state is consistent even if onAuthStateChange arrives later
-        await refreshAuthState();
-
-        toast("success", "Sei uscito", "Sessione chiusa correttamente. Ora sei in modalità ospite.");
       }catch(e){
-        console.warn(e);
-        // fallback: at least clear UI
-        state.isLogged = false;
-        state.currentUser = null;
-        state.profile = null;
-        setAuthUI(null);
-        renderCourses();
-        toast("warn", "Uscita parziale", "Ho ripulito l'interfaccia, ma controlla la connessione e riprova se serve.");
+        console.warn("signOut exception", e);
       }
+
+      // Hard cleanup (fixes rare cases where the session looks still active)
+      hardClearSupabaseStorage();
+
+      // Force UI state to logged-out (don’t rely on timing of onAuthStateChange)
+      state.isLogged = false;
+      state.currentUser = null;
+      state.profile = null;
+      setAuthUI(null);
+
+      renderCourses();
+      if (vCourse.classList.contains("active")) refreshCourseDashboard();
+
+      if (!silent){
+        toast("success", "Sei uscito", "Sessione chiusa correttamente. Ora sei in modalità ospite.");
+      }
+
+      if (opts.openLogin) openAuth("login");
     }
 
     async function refreshAuthState(){
@@ -2043,8 +2125,7 @@ function drawModuleChart(labels, vals){
       setAuthUI(user);
       renderCourses();
       if (vCourse.classList.contains("active")) refreshCourseDashboard();
-      // If auth state changed, hide any success panel
-      try{ hideAuthSuccess(); }catch(e){}
+
     }
 
     function setAuthUI(user){
@@ -2170,8 +2251,8 @@ function drawModuleChart(labels, vals){
             "Account creato con successo. I progressi verranno salvati automaticamente.",
             "Vai ai corsi",
             ()=>{ hideAuthSuccess(); navTo("dashboard"); },
-            "Gestisci account",
-            ()=>{ hideAuthSuccess(); openAuth("login"); }
+            "Cambia account",
+            ()=>{ hideAuthSuccess(); switchAccount(); }
           );
           toast("success","Registrazione completata","Sei già loggato: puoi iniziare subito.");
         } else {
