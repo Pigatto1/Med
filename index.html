@@ -667,9 +667,9 @@
                 <label class="input-label">Password</label>
                 <input class="input-field" id="loginPass" type="password" autocomplete="current-password" placeholder="••••••••" />
               </div>
-              <button class="btn-primary blue" onclick="login()">Accedi</button>
+              <button type="button" class="btn-primary blue" onclick="login()">Accedi</button>
               <div style="height:10px"></div>
-              <button class="btn-secondary" onclick="openAuth('signup')">Non hai un account? Registrati</button>
+              <button type="button" class="btn-secondary" onclick="openAuth('signup')">Non hai un account? Registrati</button>
             </div>
 
             <div id="auth-signup" class="hidden">
@@ -685,9 +685,9 @@
                 <label class="input-label">Password (min 8)</label>
                 <input class="input-field" id="signupPass" type="password" autocomplete="new-password" placeholder="Min 8 caratteri" />
               </div>
-              <button class="btn-primary blue" onclick="signup()">Crea account</button>
+              <button type="button" class="btn-primary blue" onclick="signup()">Crea account</button>
               <div style="height:10px"></div>
-              <button class="btn-secondary" onclick="openAuth('login')">Hai già un account? Accedi</button>
+              <button type="button" class="btn-secondary" onclick="openAuth('login')">Hai già un account? Accedi</button>
             </div>
 
             <p class="h-sub" style="margin-top:14px;">
@@ -1099,6 +1099,7 @@
      **********************************************************************/
     renderCourses();
     refreshSelectionBar();
+    wireAuthEnterKeys();
 
     // Prevent layout/scroll glitches after refresh
     try{ if ("scrollRestoration" in history) history.scrollRestoration = "manual"; }catch(e){}
@@ -1937,11 +1938,15 @@ function drawModuleChart(labels, vals){
         authSub.textContent = "Crea un account per salvare statistiche e progressi.";
         authSignup.classList.remove("hidden");
         authLogin.classList.add("hidden");
+      
+        try{ document.getElementById(\"signupUser\")?.focus(); }catch(e){}
       } else {
         authTitle.textContent = "Accedi";
         authSub.textContent = "Email + password. Statistiche separate per corso.";
         authLogin.classList.remove("hidden");
         authSignup.classList.add("hidden");
+      
+        try{ document.getElementById(\"loginEmail\")?.focus(); }catch(e){}
       }
 
       // mostra pannello corretto
@@ -1969,8 +1974,12 @@ function drawModuleChart(labels, vals){
     }
 
     function showAuthError(msg){
+      // Always hide success panel when showing an error
+      try{ hideAuthSuccess(); }catch(e){}
       authError.textContent = msg;
       authError.style.display = "block";
+      // Make sure the message is visible (prevents “I click and nothing happens”)
+      try{ authError.scrollIntoView({ behavior: "smooth", block: "center" }); }catch(e){}
     }
 
 
@@ -1983,6 +1992,25 @@ function drawModuleChart(labels, vals){
       if (low.includes("password should be at least")) return "Password troppo corta (min 8).";
       return msg || "Errore. Riprova.";
     }
+
+    // Bind Enter key in auth fields (better UX on desktop/mobile)
+    function wireAuthEnterKeys(){
+      try{
+        const le = document.getElementById("loginEmail");
+        const lp = document.getElementById("loginPass");
+        if (le) le.addEventListener("keydown", (e)=>{ if (e.key === "Enter") login(); });
+        if (lp) lp.addEventListener("keydown", (e)=>{ if (e.key === "Enter") login(); });
+      }catch(e){}
+      try{
+        const su = document.getElementById("signupUser");
+        const se = document.getElementById("signupEmail");
+        const sp = document.getElementById("signupPass");
+        if (su) su.addEventListener("keydown", (e)=>{ if (e.key === "Enter") signup(); });
+        if (se) se.addEventListener("keydown", (e)=>{ if (e.key === "Enter") signup(); });
+        if (sp) sp.addEventListener("keydown", (e)=>{ if (e.key === "Enter") signup(); });
+      }catch(e){}
+    }
+
 
     function hardClearSupabaseStorage(){
       try{
@@ -2053,9 +2081,21 @@ function drawModuleChart(labels, vals){
           }
         });
 
-        if (error) return showAuthError(prettyAuthError(error));
-
-        // keep user in-app and show premium success panel (no browser alert)
+        if (error){
+          const pretty = prettyAuthError(error);
+          // If the user already exists, help them jump to login automatically
+          const low = String(error.message || "").toLowerCase();
+          if (low.includes("already registered") || low.includes("user already registered")){
+            openAuth("login");
+            try{ document.getElementById("loginEmail").value = email; }catch(e){}
+            try{ document.getElementById("loginPass").value = ""; document.getElementById("loginPass").focus(); }catch(e){}
+            showAuthError(pretty);
+            toast("warn","Email già registrata","Ti ho portato alla schermata di accesso.");
+            return;
+          }
+          return showAuthError(pretty);
+        }
+// keep user in-app and show premium success panel (no browser alert)
         try{ document.getElementById("signupPass").value = ""; }catch(e){}
         showSignupSuccess();
       }catch(e){
@@ -2104,8 +2144,21 @@ function drawModuleChart(labels, vals){
 
       // Sign-out
       try{
-        const { error } = await supa.auth.signOut({ scope: "local" });
-        if (error) console.warn("signOut error", error);
+        // Try global sign-out first (more reliable when switching accounts), then fallback
+        let error = null;
+        try{
+          const resG = await supa.auth.signOut({ scope: "global" });
+          error = resG && resG.error ? resG.error : null;
+        }catch(e){}
+        if (!error){
+          // ok
+        } else {
+          console.warn("signOut(global) error", error);
+          try{
+            const resL = await supa.auth.signOut({ scope: "local" });
+            if (resL && resL.error) console.warn("signOut(local) error", resL.error);
+          }catch(e){}
+        }
       }catch(e){
         console.warn("signOut exception", e);
       }
