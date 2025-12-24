@@ -31,7 +31,7 @@
     }
 
     *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;outline:none}
-    html,body{height:100%;width:100%;margin:0;padding:0;font-family:var(--font);color:var(--text-main);overflow:hidden;background:var(--bg-body);}
+    html,body{height:100%;min-height:100dvh;width:100%;margin:0;padding:0;font-family:var(--font);color:var(--text-main);overflow:hidden;background:var(--bg-body);overscroll-behavior:none;}
 
     /* Ambient background */
     .ambient-bg{
@@ -70,7 +70,7 @@
     }
 
     header{
-      padding:20px 24px;
+      padding: calc(20px + env(safe-area-inset-top, 0px)) 24px 20px 24px;
       display:flex; align-items:center; justify-content:space-between;
       z-index:100;
     }
@@ -1100,6 +1100,11 @@
     renderCourses();
     refreshSelectionBar();
 
+    // Prevent layout/scroll glitches after refresh
+    try{ if ("scrollRestoration" in history) history.scrollRestoration = "manual"; }catch(e){}
+    try{ window.scrollTo(0,0); }catch(e){}
+    try{ document.querySelectorAll(".view").forEach(v=> v.scrollTop = 0); }catch(e){}
+
     if (!supa){
       console.warn("Supabase non configurato: inserisci SUPABASE_URL e SUPABASE_ANON_KEY.");
       setAuthUI(null);
@@ -1118,7 +1123,14 @@
      **********************************************************************/
     function navTo(viewId){
       document.querySelectorAll(".view").forEach(el => el.classList.remove("active"));
-      document.getElementById("view-" + viewId).classList.add("active");
+      const target = document.getElementById("view-" + viewId);
+      target.classList.add("active");
+
+      // keep layout stable (avoid cropped header / "storto" after refresh)
+      if (viewId === "auth" || viewId === "dashboard"){
+        try{ target.scrollTop = 0; }catch(e){}
+        try{ window.scrollTo(0,0); }catch(e){}
+      }
 
       // floating bars
       courseActions.classList.remove("visible");
@@ -1908,7 +1920,8 @@ function drawModuleChart(labels, vals){
 
       // memorizza dove tornare dopo login
       const active = document.querySelector(".view.active")?.id || "view-dashboard";
-      state.afterAuth = active.replace("view-","");
+      const from = active.replace("view-","");
+      state.afterAuth = (from === "auth") ? "dashboard" : from;
 
       authError.style.display = "none";
 
@@ -1931,13 +1944,17 @@ function drawModuleChart(labels, vals){
         authSignup.classList.add("hidden");
       }
 
-      // se già loggato, mostra pannello logged-in
+      // mostra pannello corretto
       if (state.isLogged){
-        profileLoggedOut.classList.add("hidden");
-        profileLoggedIn.classList.remove("hidden");
+        if (profileLoggedOut) profileLoggedOut.classList.add("hidden");
+        if (profileLoggedIn) profileLoggedIn.classList.remove("hidden");
+      } else {
+        if (profileLoggedOut) profileLoggedOut.classList.remove("hidden");
+        if (profileLoggedIn) profileLoggedIn.classList.add("hidden");
       }
-      // scroll top
-      window.scrollTo({ top: 0, behavior: "smooth" });
+
+      // scroll top (solo dentro la view)
+      try{ vAuth.scrollTo({ top: 0, behavior: "auto" }); }catch(e){ try{ vAuth.scrollTop = 0; }catch(e2){} }
     }
 
     function navBackFromAuth(){
@@ -2078,10 +2095,14 @@ function drawModuleChart(labels, vals){
 
       const silent = !!opts.silent;
 
+      // Clean any in-app success box (otherwise it looks like you're still logged-in)
+      try{ hideAuthSuccess(); }catch(e){}
+      try{ authError.style.display = "none"; authError.textContent = ""; }catch(e){}
+
       // Force-reset UI (prevents "stuck quiz" / missing next button)
       try{ forceResetSessionUI(); }catch(e){}
 
-      // Normal sign-out
+      // Sign-out
       try{
         const { error } = await supa.auth.signOut({ scope: "local" });
         if (error) console.warn("signOut error", error);
@@ -2089,17 +2110,50 @@ function drawModuleChart(labels, vals){
         console.warn("signOut exception", e);
       }
 
-      // Hard cleanup (fixes rare cases where the session looks still active)
+      // Extra cleanup for rare cases where the session lingers
       hardClearSupabaseStorage();
 
-      // Force UI state to logged-out (don’t rely on timing of onAuthStateChange)
+      // Optimistic UI update (no F5 needed)
       state.isLogged = false;
       state.currentUser = null;
       state.profile = null;
       setAuthUI(null);
 
+      // Give the client a tick, then re-check session
+      try{ await new Promise(r=>setTimeout(r, 80)); }catch(e){}
+      try{
+        await refreshAuthState();
+      }catch(e){
+        // Fallback: force UI state to logged-out
+        state.isLogged = false;
+        state.currentUser = null;
+        state.profile = null;
+        setAuthUI(null);
+      }
+
+      // If we're still somehow "logged", force-off
+      if (state.isLogged){
+        state.isLogged = false;
+        state.currentUser = null;
+        state.profile = null;
+        setAuthUI(null);
+      }
+
       renderCourses();
       if (vCourse.classList.contains("active")) refreshCourseDashboard();
+
+      // If user is on Account page, show login immediately
+      if (vAuth && vAuth.classList.contains("active")){
+        try{
+          authTitle.textContent = "Accedi";
+          authSub.textContent = "Email + password. Statistiche separate per corso.";
+          authLogin.classList.remove("hidden");
+          authSignup.classList.add("hidden");
+          if (profileLoggedOut) profileLoggedOut.classList.remove("hidden");
+          if (profileLoggedIn) profileLoggedIn.classList.add("hidden");
+          vAuth.scrollTop = 0;
+        }catch(e){}
+      }
 
       if (!silent){
         toast("success", "Sei uscito", "Sessione chiusa correttamente. Ora sei in modalità ospite.");
